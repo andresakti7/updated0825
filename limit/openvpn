@@ -1,0 +1,120 @@
+#!/bin/bash
+# =========================================
+# INSTALLASI OPENVPN OTOMATIS
+# Oleh: @andyyuda28
+# =========================================
+
+# Persiapan
+export DEBIAN_FRONTEND=noninteractive
+OS=$(uname -m)
+IP=$(cat /root/.myip)
+MYIP2="s/xxxxxxxxx/$IP/g"
+
+# Mendapatkan nama interface network default
+ANU=$(ip -o -4 route show to default | awk '{print $5}')
+
+# 1. Instalasi paket penting
+apt update
+apt install openvpn easy-rsa unzip openssl iptables iptables-persistent -y
+
+# 2. Download dan ekstrak konfigurasi VPN
+mkdir -p /etc/openvpn/server/easy-rsa/
+cd /etc/openvpn/
+repo="https://raw.githubusercontent.com/Andyyuda/P/main/"
+wget ${repo}ssh/vpn.zip
+unzip vpn.zip
+rm -f vpn.zip
+chown -R root:root /etc/openvpn/server/easy-rsa/
+
+# 3. Setup plugin PAM auth
+mkdir -p /usr/lib/openvpn/
+cp /usr/lib/x86_64-linux-gnu/openvpn/plugins/openvpn-plugin-auth-pam.so /usr/lib/openvpn/
+
+# 4. Aktifkan autostart OpenVPN
+sed -i 's/#AUTOSTART="all"/AUTOSTART="all"/g' /etc/default/openvpn
+
+# 5. Enable & Restart service
+systemctl enable --now openvpn-server@server-tcp
+systemctl enable --now openvpn-server@server-udp
+/etc/init.d/openvpn restart
+
+# 6. Aktifkan IP Forwarding
+echo 1 > /proc/sys/net/ipv4/ip_forward
+sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+sysctl -p
+
+# 7. Buat config client TCP
+cat > /etc/openvpn/tcp.ovpn <<-END
+client
+dev tun
+proto tcp
+remote xxxxxxxxx 1194
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+auth-user-pass
+comp-lzo
+verb 3
+END
+sed -i "$MYIP2" /etc/openvpn/tcp.ovpn
+
+# 8. Buat config client UDP
+cat > /etc/openvpn/udp.ovpn <<-END
+client
+dev tun
+proto udp
+remote xxxxxxxxx 2200
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+auth-user-pass
+comp-lzo
+verb 3
+END
+sed -i "$MYIP2" /etc/openvpn/udp.ovpn
+
+# 9. Buat config client SSL (TCP port 990)
+cat > /etc/openvpn/ssl.ovpn <<-END
+client
+dev tun
+proto tcp
+remote xxxxxxxxx 990
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+auth-user-pass
+comp-lzo
+verb 3
+END
+sed -i "$MYIP2" /etc/openvpn/ssl.ovpn
+
+# 10. Tambahkan sertifikat CA ke file .ovpn
+for prot in tcp udp ssl; do
+    echo '<ca>' >> /etc/openvpn/${prot}.ovpn
+    cat /etc/openvpn/server/ca.crt >> /etc/openvpn/${prot}.ovpn
+    echo '</ca>' >> /etc/openvpn/${prot}.ovpn
+    cp /etc/openvpn/${prot}.ovpn /var/www/html/${prot}.ovpn
+done
+
+# 11. Atur iptables untuk NAT
+iptables -t nat -I POSTROUTING -s 10.6.0.0/24 -o "$ANU" -j MASQUERADE
+iptables -t nat -I POSTROUTING -s 10.7.0.0/24 -o "$ANU" -j MASQUERADE
+
+# 12. Simpan dan aktifkan aturan iptables
+iptables-save > /etc/iptables.up.rules
+chmod +x /etc/iptables.up.rules
+iptables-restore < /etc/iptables.up.rules
+netfilter-persistent save
+netfilter-persistent reload
+
+# 13. Restart layanan OpenVPN
+systemctl enable openvpn
+systemctl start openvpn
+/etc/init.d/openvpn restart
+
+# 14. Selesai
+echo -e "\e[32mOpenVPN berhasil diinstall dan dikonfigurasi.\e[0m"
+echo "File config client tersedia di: /var/www/html/tcp.ovpn, udp.ovpn, ssl.ovpn"
